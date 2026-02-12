@@ -31,6 +31,11 @@ impl<'a, 't> ReadPacket<'a, 't> {
     pub(crate) fn conn_ref(&self) -> &crate::Conn {
         &self.0
     }
+
+    #[cfg(feature = "binlog")]
+    pub(crate) fn conn_mut(&mut self) -> &mut crate::Conn {
+        self.0.as_mut()
+    }
 }
 
 impl Future for ReadPacket<'_, '_> {

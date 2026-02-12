@@ -6,6 +6,7 @@
 // option. All files in the project carrying such notice may not be copied,
 // modified, or distributed except according to those terms.
 
+use bytes::BufMut;
 use futures_core::ready;
 use mysql_common::{
     binlog::{
@@ -14,7 +15,7 @@ use mysql_common::{
         EventStreamReader,
     },
     io::ParseBuf,
-    packets::{ComRegisterSlave, ErrPacket, NetworkStreamTerminator, OkPacketDeserializer},
+    packets::{BinlogDumpFlags, ComBinlogDump, ComRegisterSlave, ErrPacket, NetworkStreamTerminator, OkPacketDeserializer, SemiSyncAckPacket},
 };
 
 use std::{
@@ -38,9 +39,10 @@ impl super::Conn {
     /// If the request’s filename is empty, the server will send the binlog-stream of the first known binlog.
     pub async fn get_binlog_stream(
         mut self,
+        is_mariadb: bool,
         request: BinlogStreamRequest<'_>,
     ) -> Result<BinlogStream> {
-        self.request_binlog(request).await?;
+        self.request_binlog(request, is_mariadb).await?;
 
         Ok(BinlogStream::new(self))
     }
@@ -58,10 +60,27 @@ impl super::Conn {
         Ok(())
     }
 
-    async fn request_binlog(&mut self, request: BinlogStreamRequest<'_>) -> crate::Result<()> {
+    async fn request_binlog(&mut self, request: BinlogStreamRequest<'_>, is_mariadb: bool) -> crate::Result<()> {
         self.register_as_slave(request.register_slave).await?;
-        self.write_command(&request.binlog_request.as_cmd()).await?;
+        if is_mariadb {
+            let binlog_request = request.binlog_request;
+            let cmd = ComBinlogDump::new(binlog_request.server_id())
+                .with_pos(binlog_request.pos() as u32)
+                .with_filename(&*binlog_request.filename())
+                // BINLOG_SEND_ANNOTATE_ROWS_EVENT=2
+                .with_flags(BinlogDumpFlags::BINLOG_THROUGH_POSITION);
+            self.write_command(&cmd).await?;
+        } else {
+            self.write_command(&request.binlog_request.as_cmd()).await?;
+        }
+        
         Ok(())
+    }
+
+    // reply_ack
+    pub async fn reply_ack(&mut self, position: u64, filename: &[u8]) -> Result<()> {
+        let packet = SemiSyncAckPacket::new(position, filename);
+        self.write_command(&packet).await
     }
 }
 
@@ -74,6 +93,10 @@ pub struct BinlogStream {
     // TODO: Use 'static reader here (requires impl on the mysql_common side).
     /// Uncompressed Transaction_payload_event we are iterating over (if any).
     tpe: Option<Cursor<Vec<u8>>>,
+
+    sync_flag: bool,
+    need_reply: bool,
+    // raw: Vec<u8>,
 }
 
 impl BinlogStream {
@@ -83,6 +106,9 @@ impl BinlogStream {
             read_packet: ReadPacket::new(conn),
             esr: EventStreamReader::new(Version4),
             tpe: None,
+            sync_flag: false,
+            need_reply: false,
+            // raw: Vec::new()
         }
     }
 
@@ -112,6 +138,19 @@ impl BinlogStream {
 
         Ok(())
     }
+
+    pub fn get_conn_mut(&mut self) -> &mut Conn {
+        self.read_packet.conn_mut()
+    }
+
+    pub fn get_semi_sync_status(&self) -> (bool, bool) {
+        (self.sync_flag, self.need_reply)
+    }
+
+    // pub fn get_raw(&self) -> &Vec<u8> {
+    //     &self.raw
+    // }
+
 }
 
 impl futures_core::stream::Stream for BinlogStream {
@@ -161,22 +200,31 @@ impl futures_core::stream::Stream for BinlogStream {
         }
 
         if first_byte == Some(0) {
-            let event_data = &packet[1..];
+            let mut event_data = &packet[1..];
+            self.sync_flag = event_data[0] == 0xef;
+            if event_data[0] == 0xef {
+                self.need_reply = event_data[1] == 0x01;
+                event_data = &packet[3..];
+            }
+            // println!("event_data: {:?}", event_data);
             match self.esr.read(event_data) {
                 Ok(Some(event)) => {
-                    if event.header().event_type_raw() == EventType::TRANSACTION_PAYLOAD_EVENT as u8
-                    {
-                        #[allow(clippy::single_match)]
-                        match event.read_event::<TransactionPayloadEvent<'_>>() {
-                            Ok(e) => self.tpe = Some(Cursor::new(e.danger_decompress())),
-                            Err(_) => (/* TODO: Log the error */),
-                        }
-                    }
+                    // 无需特殊处理，直接写入binlog就行
+                    // if event.header().event_type_raw() == EventType::TRANSACTION_PAYLOAD_EVENT as u8
+                    // {
+                    //     #[allow(clippy::single_match)]
+                    //     match event.read_event::<TransactionPayloadEvent<'_>>() {
+                    //         Ok(e) => self.tpe = Some(Cursor::new(e.danger_decompress())),
+                    //         Err(_) => (/* TODO: Log the error */),
+                    //     }
+                    // }
                     Poll::Ready(Some(Ok(event)))
                 }
                 Ok(None) => Poll::Ready(None),
                 Err(err) => Poll::Ready(Some(Err(err.into()))),
             }
+            // let fde = mysql_common::binlog::events::FormatDescriptionEvent::new(crate::binlog::BinlogVersion::Version4);
+            // Poll::Ready(Some(Ok(Event::read(&fde, event_data).unwrap())))
         } else {
             Poll::Ready(Some(Err(DriverError::UnexpectedPacket {
                 payload: packet.to_vec(),

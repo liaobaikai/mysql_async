@@ -674,6 +674,12 @@ pub(crate) struct MysqlOpts {
     /// When set, the client will advertise `CLIENT_CONNECT_ATTRS` and send the provided
     /// key-value attributes to the server.
     connect_attributes: Option<std::collections::HashMap<String, String>>,
+
+    // Add by liaobaikai, 2025-11-02
+    // --server-public-key-path=
+    public_key: Option<Vec<u8>>,
+    // --get-server-public-key
+    get_server_public_key: bool
 }
 
 /// Mysql connection options.
@@ -1098,6 +1104,14 @@ impl Opts {
         self.inner.mysql_opts.connect_attributes.as_ref()
     }
 
+    // add by liaobaikai 
+    pub fn get_server_public_key(&self) -> bool {
+        self.inner.mysql_opts.get_server_public_key
+    }
+    pub fn public_key(&self) -> &Option<Vec<u8>> {
+        &self.inner.mysql_opts.public_key
+    }
+
     pub(crate) fn get_capabilities(&self) -> CapabilityFlags {
         let mut out = CapabilityFlags::CLIENT_PROTOCOL_41
             | CapabilityFlags::CLIENT_SECURE_CONNECTION
@@ -1155,6 +1169,8 @@ impl Default for MysqlOpts {
             client_found_rows: false,
             enable_cleartext_plugin: false,
             connect_attributes: None,
+            public_key: None,
+            get_server_public_key: false,
         }
     }
 }
@@ -1508,6 +1524,17 @@ impl OptsBuilder {
             .connect_attributes
             .get_or_insert_with(Default::default);
         map.insert(key.into(), value.into());
+        self
+    }
+
+    // add by liaobaikai
+    pub fn public_key(mut self, public_key: Option<Vec<u8>>) -> Self {
+        self.opts.public_key = public_key;
+        self
+    }
+    // add by liaobaikai
+    pub fn get_server_public_key(mut self, get_server_public_key: bool) -> Self {
+        self.opts.get_server_public_key = get_server_public_key;
         self
     }
 }
