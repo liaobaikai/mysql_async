@@ -6,12 +6,11 @@
 // option. All files in the project carrying such notice may not be copied,
 // modified, or distributed except according to those terms.
 
-use bytes::BufMut;
 use futures_core::ready;
 use mysql_common::{
     binlog::{
-        consts::{BinlogVersion::Version4, EventType},
-        events::{Event, TableMapEvent, TransactionPayloadEvent},
+        consts::BinlogVersion::Version4,
+        events::{Event, TableMapEvent},
         EventStreamReader,
     },
     io::ParseBuf,
